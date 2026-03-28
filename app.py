@@ -1,11 +1,10 @@
-# 🚀 IPL AI Predictor ULTRA PRO
+ # 🚀 IPL AI Predictor ULTRA PRO (FINAL FIXED)
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
-import random
 import requests
 
 # 🔴 ADD YOUR API KEY HERE
@@ -69,18 +68,34 @@ def calc_stats(df):
 
 team_stats = calc_stats(data)
 
-# ================= FEATURES =================
-data['team1_strength'] = data['team1'].map(lambda x: team_stats[x]['win_rate'])
-data['team2_strength'] = data['team2'].map(lambda x: team_stats[x]['win_rate'])
-data['pitch_score'] = data['venue'].map(lambda x: pitch_score(pitch_map.get(x,"balanced")))
+# ================= FEATURE ENGINEERING =================
+def prepare_features(df, ref_columns=None):
+    df = df.copy()
 
-features = data[["team1","team2","toss_winner","venue","team1_strength","team2_strength","pitch_score"]]
-target = data["winner"]
+    df['team1_strength'] = df['team1'].map(lambda x: team_stats.get(x, {"win_rate":0.5})['win_rate'])
+    df['team2_strength'] = df['team2'].map(lambda x: team_stats.get(x, {"win_rate":0.5})['win_rate'])
+    df['pitch_score'] = df['venue'].map(lambda x: pitch_score(pitch_map.get(x,"balanced")))
 
-features = pd.get_dummies(features)
+    X = df[[
+        "team1","team2","toss_winner","venue",
+        "team1_strength","team2_strength","pitch_score"
+    ]]
+
+    X = pd.get_dummies(X)
+
+    if ref_columns is not None:
+        X = X.reindex(columns=ref_columns, fill_value=0)
+
+    return X
+
+# ================= TRAIN MODEL =================
+X = prepare_features(data)
+y = data["winner"]
 
 model = RandomForestClassifier(n_estimators=200)
-model.fit(features, target)
+model.fit(X, y)
+
+feature_columns = X.columns
 
 teams = sorted(team_stats.keys())
 venues = sorted(data['venue'].unique())
@@ -125,32 +140,29 @@ def home():
 @app.get("/predict", response_class=HTMLResponse)
 def predict(team1:str, team2:str, toss_winner:str, venue:str):
 
-    t1 = team_stats[team1]['win_rate']
-    t2 = team_stats[team2]['win_rate']
-
-    pitch = pitch_map.get(venue,"balanced")
-    p_score = pitch_score(pitch)
-
     df = pd.DataFrame([{
-        "team1":team1,"team2":team2,"toss_winner":toss_winner,"venue":venue,
-        "team1_strength":t1,"team2_strength":t2,"pitch_score":p_score
+        "team1":team1,
+        "team2":team2,
+        "toss_winner":toss_winner,
+        "venue":venue
     }])
 
-    df = pd.get_dummies(df)
-    df = df.reindex(columns=features.columns, fill_value=0)
+    X_new = prepare_features(df, feature_columns)
 
-    base = max(model.predict_proba(df)[0])
+    base = max(model.predict_proba(X_new)[0])
 
     prob = base
     prob += matchup_adv(team1,team2)
     prob += home_adv(team1,venue)
-    prob += p_score
+
+    pitch = pitch_map.get(venue,"balanced")
+    prob += pitch_score(pitch)
 
     prob = max(0,min(1,prob))
 
-    return f"<h2>{team1} vs {team2}</h2><h3>Winner: {model.predict(df)[0]}</h3><h3>{round(prob*100,2)}%</h3><a href='/'>Back</a>"
+    return f"<h2>{team1} vs {team2}</h2><h3>Winner: {model.predict(X_new)[0]}</h3><h3>{round(prob*100,2)}%</h3><a href='/'>Back</a>"
 
-# ================= LIVE (BALL BY BALL) =================
+# ================= LIVE =================
 @app.get("/live", response_class=HTMLResponse)
 def live(score:int,wickets:int,overs:float,target:int):
 
@@ -175,7 +187,10 @@ def live_auto():
 
         t1,t2=m['teams']
         s=m['score'][0]
-        score=s['r']; overs=s['o']; wickets=s['w']
+
+        score=s['r']
+        overs=s['o']
+        wickets=s['w']
         target=score+20
 
     except:
@@ -192,12 +207,20 @@ def live_auto():
 # ================= RETRAIN =================
 @app.get("/retrain")
 def retrain():
-    global model
-    new=pd.read_csv("ipl_matches.csv")
-    X=pd.get_dummies(new[["team1","team2","toss_winner","venue"]])
-    y=new["winner"]
-    model.fit(X,y)
-    return {"status":"retrained"}
+    global model, feature_columns, team_stats
+
+    new = pd.read_csv("ipl_matches.csv")
+
+    # update stats
+    team_stats = calc_stats(new)
+
+    X_new = prepare_features(new)
+    y_new = new["winner"]
+
+    model.fit(X_new, y_new)
+    feature_columns = X_new.columns
+
+    return {"status": "retrained successfully"}
 
 # ================= RUN =================
 if __name__=="__main__":
